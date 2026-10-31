@@ -5,7 +5,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -24,17 +23,23 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleService
 import `in`.developerbrijesh.reelsense.MainActivity
 import `in`.developerbrijesh.reelsense.accessibility.ReelSenseAccessibilityService
 import `in`.developerbrijesh.reelsense.commands.NativeCommandMatcher
+import `in`.developerbrijesh.reelsense.gestures.CustomGestureTemplate
+import `in`.developerbrijesh.reelsense.gestures.GestureCameraManager
+import `in`.developerbrijesh.reelsense.gestures.GestureHandler
+import `in`.developerbrijesh.reelsense.gestures.HandGesture
 import `in`.developerbrijesh.reelsense.overlay.OverlayState
 import `in`.developerbrijesh.reelsense.overlay.ReelSenseOverlayManager
 
-class ReelSenseMonitoringService : Service() {
+class ReelSenseMonitoringService : LifecycleService() {
 
     companion object {
         private const val TAG_MONITOR = "ReelSenseMonitor"
         private const val TAG_SPEECH = "ReelSenseSpeech"
+        private const val TAG_GESTURE = "ReelSenseGesture"
 
         const val NOTIFICATION_ID = 3001
         const val CHANNEL_ID = "reelsense_monitoring_channel"
@@ -78,11 +83,14 @@ class ReelSenseMonitoringService : Service() {
     private var isManuallyStopped: Boolean = false
     private var isPaused: Boolean = false
 
-    // Speech Recognition Loop Management
+    // Speech Recognition Loop Management (Voice Mode)
     private var speechRecognizer: SpeechRecognizer? = null
     private var isSpeechListening: Boolean = false
     private var isSpeechStarting: Boolean = false
     private var restartRunnable: Runnable? = null
+
+    // Camera Gesture Recognition Management (Gesture Mode)
+    private var gestureCameraManager: GestureCameraManager? = null
 
     // Screen Receiver
     private val screenReceiver = object : BroadcastReceiver() {
@@ -125,6 +133,7 @@ class ReelSenseMonitoringService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
         val action = intent?.action ?: ACTION_START_MONITORING
 
         when (action) {
@@ -134,12 +143,25 @@ class ReelSenseMonitoringService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_UPDATE_CONFIG, ACTION_START_MONITORING -> {
+                val previousMode = controllerMode
                 intent?.getStringExtra(EXTRA_CONTROLLER_MODE)?.let { controllerMode = it }
                 intent?.getStringExtra(EXTRA_RECOGNITION_MODE)?.let { recognitionMode = it }
                 intent?.getStringExtra(EXTRA_LOCALE)?.let { selectedLocale = it }
                 commandMatcher?.reloadCommands()
 
                 Log.d(TAG_MONITOR, "Monitoring config updated: mode=$controllerMode, recognition=$recognitionMode, locale=$selectedLocale")
+
+                if (isControllerActive && previousMode != controllerMode) {
+                    if (controllerMode == "voice") {
+                        stopGestureCamera()
+                        startSpeechLoop()
+                    } else if (controllerMode == "gesture") {
+                        stopSpeechLoop()
+                        startGestureCamera()
+                    }
+                    overlayManager?.show(controllerMode)
+                }
+
                 startForegroundWithNotification()
             }
             ACTION_MANUAL_STOP -> manualStopController()
@@ -150,7 +172,10 @@ class ReelSenseMonitoringService : Service() {
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent): IBinder? {
+        super.onBind(intent)
+        return null
+    }
 
     override fun onDestroy() {
         Log.d(TAG_MONITOR, "ReelSenseMonitoringService stopping or destroyed.")
@@ -159,6 +184,7 @@ class ReelSenseMonitoringService : Service() {
         } catch (_: Exception) {}
 
         deactivateController(reason = "Service destroyed")
+        releaseGestureCamera()
         overlayManager?.hide(reason = "Service destroyed")
         overlayManager = null
 
@@ -206,9 +232,11 @@ class ReelSenseMonitoringService : Service() {
             updateNotification(isActive = true)
 
             if (controllerMode == "voice") {
+                stopGestureCamera()
                 startSpeechLoop()
-            } else {
-                overlayManager?.updateTranscript("Hand gesture tracking active")
+            } else if (controllerMode == "gesture") {
+                stopSpeechLoop()
+                startGestureCamera()
             }
         }
     }
@@ -221,6 +249,7 @@ class ReelSenseMonitoringService : Service() {
             Log.d(TAG_MONITOR, "Deactivating controller. Reason: $reason")
             cancelPendingRestart()
             stopSpeechLoop()
+            stopGestureCamera()
             overlayManager?.hide(reason = reason)
             updateNotification(isActive = false)
         }
@@ -232,6 +261,7 @@ class ReelSenseMonitoringService : Service() {
             isPaused = true
             cancelPendingRestart()
             stopSpeechLoop()
+            stopGestureCamera()
             overlayManager?.setPaused(true)
             updateNotification(isActive = false, customText = "Controller Paused")
             Log.d(TAG_MONITOR, "Controller paused by user.")
@@ -255,6 +285,8 @@ class ReelSenseMonitoringService : Service() {
 
             if (controllerMode == "voice") {
                 startSpeechLoop()
+            } else if (controllerMode == "gesture") {
+                startGestureCamera()
             }
             Log.d(TAG_MONITOR, "Controller resumed.")
         }
@@ -270,7 +302,103 @@ class ReelSenseMonitoringService : Service() {
         }
     }
 
-    // --- Native Speech Recognition Continuous Loop ---
+    // --- Native Camera Gesture Recognition (Gesture Mode) ---
+
+    private fun startGestureCamera() {
+        mainHandler.post {
+            if (!isControllerActive || isPaused || isManuallyStopped ||
+                currentForegroundPackage != ReelSenseAccessibilityService.INSTAGRAM_PACKAGE) {
+                Log.d(TAG_GESTURE, "startGestureCamera skipped: active=$isControllerActive, paused=$isPaused, stopped=$isManuallyStopped, pkg=$currentForegroundPackage")
+                return@post
+            }
+
+            if (!hasCameraPermission()) {
+                Log.w(TAG_GESTURE, "Cannot start camera: CAMERA permission missing.")
+                overlayManager?.showError("Camera permission required")
+                return@post
+            }
+
+            if (gestureCameraManager == null) {
+                gestureCameraManager = GestureCameraManager(
+                    context = applicationContext,
+                    lifecycleOwner = this,
+                    onActionTriggered = { gestureName, action ->
+                        handleGestureAction(gestureName, action)
+                    },
+                    onStateUpdated = { gestureName, isHandPresent, action ->
+                        handleGestureStateUpdated(gestureName, isHandPresent, action)
+                    }
+                )
+            }
+
+            gestureCameraManager?.start()
+            overlayManager?.updateGestureTracking(isCameraActive = true, isHandPresent = false)
+            Log.i(TAG_GESTURE, "GestureCameraManager started.")
+        }
+    }
+
+    private fun handleGestureAction(gestureName: String, action: String) {
+        mainHandler.post {
+            if (!isControllerActive || isPaused || isManuallyStopped ||
+                currentForegroundPackage != ReelSenseAccessibilityService.INSTAGRAM_PACKAGE) {
+                return@post
+            }
+
+            Log.i(TAG_GESTURE, "Gesture confirmed: $gestureName -> Executing $action")
+            overlayManager?.showGestureAction(gestureName, action)
+
+            val a11y = ReelSenseAccessibilityService.instance
+            if (a11y != null) {
+                a11y.performReelAction(action)
+                Log.i(TAG_GESTURE, "Accessibility action executed: $action")
+            } else {
+                Log.w(TAG_GESTURE, "AccessibilityService instance is null! Cannot dispatch gesture.")
+            }
+
+            GestureHandler.instance?.sendGestureEvent(gestureName, true, action)
+        }
+    }
+
+    private fun handleGestureStateUpdated(gestureName: String?, isHandPresent: Boolean, action: String?) {
+        mainHandler.post {
+            if (!isControllerActive || isPaused || isManuallyStopped) return@post
+            overlayManager?.updateGestureTracking(
+                isCameraActive = true,
+                isHandPresent = isHandPresent,
+                gestureDisplayName = gestureName,
+                gestureAction = action
+            )
+            GestureHandler.instance?.sendGestureEvent(gestureName ?: "Unknown", isHandPresent, null)
+        }
+    }
+
+    fun updateCustomGestures(templates: List<CustomGestureTemplate>) {
+        gestureCameraManager?.updateCustomTemplates(templates)
+    }
+
+    private fun stopGestureCamera() {
+        mainHandler.post {
+            gestureCameraManager?.stop()
+            overlayManager?.updateGestureTracking(isCameraActive = false, isHandPresent = false)
+            Log.d(TAG_GESTURE, "Gesture camera stopped.")
+        }
+    }
+
+    private fun releaseGestureCamera() {
+        mainHandler.post {
+            gestureCameraManager?.release()
+            gestureCameraManager = null
+        }
+    }
+
+    private fun hasCameraPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    // --- Native Speech Recognition Continuous Loop (Voice Mode) ---
 
     private fun startSpeechLoop() {
         mainHandler.post {
@@ -296,7 +424,6 @@ class ReelSenseMonitoringService : Service() {
             isSpeechStarting = true
             Log.d(TAG_SPEECH, "Speech recognition starting (mode=$recognitionMode, locale=$selectedLocale)...")
 
-            // Re-instantiate recognizer safely to avoid stale internal state across loop cycles
             destroySpeechRecognizer()
 
             try {
@@ -352,8 +479,6 @@ class ReelSenseMonitoringService : Service() {
                         val errorName = getSpeechErrorName(error)
                         Log.d(TAG_SPEECH, "Recognition error code: $error ($errorName)")
 
-                        // Recoverable errors: NO_MATCH (7) and SPEECH_TIMEOUT (6) mean silence / no command spoken
-                        // The overlay MUST NOT disappear!
                         if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                             Log.d(TAG_SPEECH, "No speech or timeout detected. Continuing continuous listening loop.")
                             scheduleRestartSpeechLoop(250)
@@ -368,7 +493,6 @@ class ReelSenseMonitoringService : Service() {
                             Log.e(TAG_SPEECH, "Insufficient audio permissions.")
                             overlayManager?.showError("Microphone permission required")
                         } else {
-                            // General error: restart cleanly
                             scheduleRestartSpeechLoop(350)
                         }
                     }
@@ -386,7 +510,6 @@ class ReelSenseMonitoringService : Service() {
                             overlayManager?.updateState(OverlayState.LISTENING)
                         }
 
-                        // Seamlessly loop to next utterance
                         scheduleRestartSpeechLoop(350)
                     }
 
@@ -522,11 +645,9 @@ class ReelSenseMonitoringService : Service() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     fgsType = fgsType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 }
-            } else if (controllerMode == "gesture") {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        fgsType = fgsType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-                    }
+            } else if (controllerMode == "gesture" && hasCameraPermission()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    fgsType = fgsType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
                 }
             }
 
@@ -573,16 +694,22 @@ class ReelSenseMonitoringService : Service() {
             if (controllerMode == "voice") {
                 "Listening for voice commands ($recognitionMode)"
             } else {
-                "Tracking hand gestures"
+                "Tracking hand gestures with camera"
             }
         } else {
             "Monitoring in background. Opens hands-free controls when Instagram launches."
         }
 
+        val iconRes = if (controllerMode == "voice") {
+            android.R.drawable.ic_btn_speak_now
+        } else {
+            android.R.drawable.ic_menu_camera
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setSmallIcon(iconRes)
             .setOngoing(true)
             .setContentIntent(contentPendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop Monitoring", stopPendingIntent)
@@ -590,7 +717,7 @@ class ReelSenseMonitoringService : Service() {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
-        }
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

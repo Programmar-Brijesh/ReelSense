@@ -19,6 +19,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import `in`.developerbrijesh.reelsense.gestures.HandGesture
 
 enum class OverlayState {
     CONNECTING,
@@ -285,6 +286,81 @@ class ReelSenseOverlayManager(
         )
     }
 
+    fun updateGestureTracking(
+        isCameraActive: Boolean,
+        isHandPresent: Boolean,
+        detectedGesture: HandGesture? = null
+    ) {
+        updateGestureTracking(
+            isCameraActive = isCameraActive,
+            isHandPresent = isHandPresent,
+            gestureDisplayName = if (detectedGesture != null && detectedGesture != HandGesture.UNKNOWN) detectedGesture.displayName else null,
+            gestureAction = detectedGesture?.action
+        )
+    }
+
+    fun updateGestureTracking(
+        isCameraActive: Boolean,
+        isHandPresent: Boolean,
+        gestureDisplayName: String? = null,
+        gestureAction: String? = null
+    ) {
+        mainHandler.post {
+            if (!isVisible || rootView == null) return@post
+            if (currentState == OverlayState.PAUSED) return@post
+            if (currentState == OverlayState.ACTION_EXECUTED) return@post
+
+            if (!isCameraActive) {
+                statusTextView?.text = "Camera Inactive"
+                statusTextView?.setTextColor(Color.parseColor("#FFA726"))
+                transcriptTextView?.text = "Camera is paused"
+                stopPulseAnimation()
+                return@post
+            }
+
+            if (isHandPresent) {
+                startPulseAnimation()
+                if (!gestureDisplayName.isNullOrBlank()) {
+                    statusTextView?.text = "Gesture: $gestureDisplayName"
+                    statusTextView?.setTextColor(Color.parseColor("#35D6E8"))
+                    val mappedAction = gestureAction?.let { formatActionName(it) } ?: ""
+                    transcriptTextView?.text = if (mappedAction.isNotBlank()) "Action: $mappedAction" else "Hold steady to confirm"
+                    transcriptTextView?.setTextColor(Color.parseColor("#FFFFFF"))
+                } else {
+                    statusTextView?.text = "Hand Detected"
+                    statusTextView?.setTextColor(Color.parseColor("#35D6E8"))
+                    transcriptTextView?.text = "Ready for gesture"
+                    transcriptTextView?.setTextColor(Color.parseColor("#A5A5B5"))
+                }
+            } else {
+                stopPulseAnimation()
+                statusTextView?.text = "Camera Active"
+                statusTextView?.setTextColor(Color.parseColor("#FFFFFF"))
+                transcriptTextView?.text = "Show hand to control reels"
+                transcriptTextView?.setTextColor(Color.parseColor("#A5A5B5"))
+            }
+        }
+    }
+
+    fun showGestureAction(gesture: HandGesture, action: String) {
+        showGestureAction(gesture.displayName, action)
+    }
+
+    fun showGestureAction(gestureName: String, action: String) {
+        mainHandler.post {
+            if (!isVisible || rootView == null) return@post
+            currentState = OverlayState.ACTION_EXECUTED
+            val actionLabel = formatActionName(action)
+            statusTextView?.text = "Action: $actionLabel executed ✓"
+            statusTextView?.setTextColor(Color.parseColor("#35D6E8"))
+            transcriptTextView?.text = "Gesture: $gestureName"
+            transcriptTextView?.setTextColor(Color.parseColor("#E0F7FA"))
+            stopPulseAnimation()
+
+            scheduleAutoResetToListening(1600)
+        }
+    }
+
     fun setPaused(paused: Boolean) {
         if (paused) {
             updateState(OverlayState.PAUSED)
@@ -297,7 +373,12 @@ class ReelSenseOverlayManager(
         cancelAutoReset()
         autoResetRunnable = Runnable {
             if (isVisible && currentState != OverlayState.PAUSED) {
-                updateState(OverlayState.LISTENING)
+                if (currentMode == "gesture") {
+                    currentState = OverlayState.LISTENING
+                    updateGestureTracking(isCameraActive = true, isHandPresent = false)
+                } else {
+                    updateState(OverlayState.LISTENING)
+                }
             }
         }
         mainHandler.postDelayed(autoResetRunnable!!, delayMs)

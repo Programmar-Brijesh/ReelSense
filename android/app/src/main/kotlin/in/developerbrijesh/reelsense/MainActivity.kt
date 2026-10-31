@@ -7,11 +7,13 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import `in`.developerbrijesh.reelsense.autostart.AutoStartHandler
 import `in`.developerbrijesh.reelsense.service.ReelSenseMonitoringService
+import `in`.developerbrijesh.reelsense.gestures.GestureHandler
 import `in`.developerbrijesh.reelsense.speech.SpeechRecognitionHandler
 
 class MainActivity : FlutterActivity() {
     private var speechHandler: SpeechRecognitionHandler? = null
     private var autoStartHandler: AutoStartHandler? = null
+    private var gestureHandler: GestureHandler? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -21,6 +23,10 @@ class MainActivity : FlutterActivity() {
         }
 
         autoStartHandler = AutoStartHandler(applicationContext, this).apply {
+            register(flutterEngine.dartExecutor.binaryMessenger)
+        }
+
+        gestureHandler = GestureHandler(applicationContext, this).apply {
             register(flutterEngine.dartExecutor.binaryMessenger)
         }
 
@@ -58,6 +64,9 @@ class MainActivity : FlutterActivity() {
 
         autoStartHandler?.unregister()
         autoStartHandler = null
+
+        gestureHandler?.unregister()
+        gestureHandler = null
 
         super.onDestroy()
     }

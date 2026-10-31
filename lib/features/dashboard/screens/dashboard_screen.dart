@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../autostart/models/auto_start_config.dart';
 import '../../autostart/screens/auto_start_settings_screen.dart';
 import '../../autostart/services/auto_start_platform_service.dart';
 import '../../autostart/services/auto_start_preference_service.dart';
 import '../../commands/screens/voice_commands_screen.dart';
 import '../../gestures/screens/gesture_settings_screen.dart';
+import '../../gestures/services/gesture_platform_service.dart';
 import '../../permissions/screens/permissions_screen.dart';
 import '../../privacy/screens/privacy_settings_screen.dart';
 import '../../recognition/screens/voice_settings_screen.dart';
@@ -33,6 +35,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       RecognitionPreferenceService();
   final RecognitionAvailabilityService _availabilityService =
       RecognitionAvailabilityService();
+  final GesturePlatformService _gestureService = GesturePlatformService();
 
   ControllerState _state = const ControllerState();
   bool _isLoading = true;
@@ -173,11 +176,44 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _toggleGestureControl(bool enabled) async {
+    if (enabled) {
+      final hasCam = await _gestureService.hasCameraPermission();
+      if (!hasCam) {
+        final granted = await _gestureService.requestCameraPermission();
+        if (!granted) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                backgroundColor: Color(0xFF261919),
+                behavior: SnackBarBehavior.floating,
+                duration: Duration(seconds: 3),
+                content: Text(
+                  'Camera permission is required for hand gesture tracking.',
+                  style: TextStyle(color: Color(0xFFFFCDD2)),
+                ),
+              ),
+            );
+          }
+          return;
+        }
+      }
+    }
+
     setState(() {
       _state = _state.copyWith(isGestureEnabled: enabled);
     });
 
     await _prefsService.setGestureControlEnabled(enabled);
+
+    if (enabled) {
+      try {
+        final autoStartConfig = await AutoStartPreferenceService().loadConfig();
+        await AutoStartPlatformService().updateConfig(
+          autoStartConfig.copyWith(controllerMode: AutoStartControllerMode.gesture),
+        );
+      } catch (_) {}
+    }
 
     if (mounted) {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
