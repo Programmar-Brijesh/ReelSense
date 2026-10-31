@@ -6,7 +6,7 @@ class CommandDatabaseHelper {
   static const String tableName = 'voice_commands';
   static const String customGesturesTableName = 'custom_gestures';
   static const String databaseName = 'reelsense_voice_commands.db';
-  static const int databaseVersion = 2;
+  static const int databaseVersion = 3;
 
   static final CommandDatabaseHelper instance = CommandDatabaseHelper._internal();
   Database? _database;
@@ -73,35 +73,13 @@ class CommandDatabaseHelper {
       batch.insert(tableName, cmd.toMap());
     }
     await batch.commit(noResult: true);
-
-    await _createCustomGesturesTable(db);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 2) {
-      await _createCustomGesturesTable(db);
+    if (oldVersion < 3) {
+      // Safely drop obsolete custom gestures table and its index if they exist
+      await db.execute('DROP TABLE IF EXISTS $customGesturesTableName');
     }
-  }
-
-  static Future<void> _createCustomGesturesTable(Database db) async {
-    await db.execute('''
-      CREATE TABLE $customGesturesTableName (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        action TEXT NOT NULL,
-        landmark_template_json TEXT NOT NULL,
-        sample_count INTEGER NOT NULL,
-        confidence_threshold REAL NOT NULL,
-        is_enabled INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )
-    ''');
-
-    await db.execute('''
-      CREATE INDEX idx_custom_gestures_enabled 
-      ON $customGesturesTableName (is_enabled)
-    ''');
   }
 
   Future<void> close() async {

@@ -43,16 +43,6 @@ class GestureStateMachine(
         }
     }
 
-    @Synchronized
-    fun processCustomFrame(template: CustomGestureTemplate, isHandPresent: Boolean) {
-        val cand = GestureCandidate(
-            key = "custom_${template.id}",
-            displayName = template.name,
-            action = template.action
-        )
-        Log.d(TAG, "processCustomFrame: candidate key=${cand.key}, name=${cand.displayName}, action=${cand.action}")
-        processCandidate(cand, isHandPresent)
-    }
 
     @Synchronized
     fun processCandidate(detectedCandidate: GestureCandidate?, isHandPresent: Boolean) {

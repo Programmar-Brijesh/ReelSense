@@ -11,15 +11,11 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.LifecycleOwner
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
-import `in`.developerbrijesh.reelsense.service.ReelSenseMonitoringService
-import org.json.JSONArray
-import org.json.JSONObject
 
 class GestureHandler(
     private val context: Context,
@@ -46,9 +42,6 @@ class GestureHandler(
 
     private var pendingPermissionResult: MethodChannel.Result? = null
 
-    // Dedicated CameraManager for registration and live testing inside Flutter app
-    private var previewCameraManager: GestureCameraManager? = null
-
     fun register(messenger: BinaryMessenger) {
         instance = this
         methodChannel = MethodChannel(messenger, METHOD_CHANNEL).apply {
@@ -59,17 +52,19 @@ class GestureHandler(
         }
     }
 
-    fun setActivity(act: Activity?) {
-        this.activity = act
-    }
-
     fun unregister() {
-        stopPreviewCamera()
-        if (instance == this) instance = null
         methodChannel?.setMethodCallHandler(null)
         methodChannel = null
         eventChannel?.setStreamHandler(null)
         eventChannel = null
+        eventSink = null
+        if (instance == this) {
+            instance = null
+        }
+    }
+
+    fun setActivity(act: Activity?) {
+        this.activity = act
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -95,220 +90,8 @@ class GestureHandler(
                     }
                 result.success(mappings)
             }
-            "syncCustomGestures" -> {
-                handleSyncCustomGestures(call, result)
-            }
-            "startGestureRegistration" -> {
-                handleStartGestureRegistration(result)
-            }
-            "stopGestureRegistration" -> {
-                handleStopGestureRegistration(result)
-            }
-            "startGestureTest" -> {
-                handleStartGestureTest(result)
-            }
-            "stopGestureTest" -> {
-                handleStopGestureTest(result)
-            }
-            "validateGestureConflict" -> {
-                handleValidateGestureConflict(call, result)
-            }
             else -> result.notImplemented()
         }
-    }
-
-    // --- Custom Gestures Synchronization ---
-
-    private fun handleSyncCustomGestures(call: MethodCall, result: MethodChannel.Result) {
-        val tagSync = "ReelSenseGestureSync"
-        try {
-            val list = call.argument<List<Map<String, Any>>>("gestures") ?: emptyList()
-            val jsonArray = JSONArray()
-            val templates = ArrayList<CustomGestureTemplate>()
-
-            Log.i(tagSync, "handleSyncCustomGestures: received ${list.size} gestures from Flutter.")
-
-            for (map in list) {
-                val id = map["id"] as? String ?: continue
-                val name = map["name"] as? String ?: continue
-                val action = map["action"] as? String ?: continue
-                val templateJson = map["templateJson"] as? String ?: continue
-                val threshold = (map["confidenceThreshold"] as? Number)?.toFloat() ?: 0.82f
-                val isEnabled = map["isEnabled"] as? Boolean ?: true
-
-                val obj = JSONObject().apply {
-                    put("id", id)
-                    put("name", name)
-                    put("action", action)
-                    put("templateJson", templateJson)
-                    put("confidenceThreshold", threshold)
-                    put("isEnabled", isEnabled)
-                }
-                jsonArray.put(obj)
-
-                val t = CustomGestureTemplate.fromJson(templateJson, id, name, action, threshold, isEnabled)
-                if (t != null) {
-                    templates.add(t)
-                    Log.d(tagSync, "Parsed gesture: id=$id, name='$name', action=$action, threshold=$threshold, enabled=$isEnabled, landmarks=${t.landmarks.size}")
-                } else {
-                    Log.w(tagSync, "Failed to parse template for gesture id=$id, name='$name'")
-                }
-            }
-
-            // Save to shared preferences cache
-            CustomGestureClassifier.saveToPrefs(context, jsonArray.toString())
-            CustomGestureClassifier.sharedTemplates.clear()
-            CustomGestureClassifier.sharedTemplates.addAll(templates)
-
-            previewCameraManager?.updateCustomTemplates(templates)
-            ReelSenseMonitoringService.instance?.updateCustomGestures(templates)
-
-            Log.i(tagSync, "Successfully synced ${templates.size} custom gestures to SharedPreferences, sharedTemplates, and active engines.")
-            result.success(true)
-        } catch (e: Exception) {
-            Log.e(tagSync, "Failed to sync custom gestures: ${e.message}", e)
-            result.error("SYNC_ERROR", e.message, null)
-        }
-    }
-
-    // --- Custom Gesture Registration Session ---
-
-    private fun handleStartGestureRegistration(result: MethodChannel.Result) {
-        val owner = activity as? LifecycleOwner
-        if (owner == null) {
-            result.error("NO_LIFECYCLE", "Activity does not implement LifecycleOwner", null)
-            return
-        }
-
-        if (!hasCameraPermission()) {
-            result.error("NO_PERMISSION", "Camera permission is required for gesture registration", null)
-            return
-        }
-
-        ensurePreviewCamera(owner)
-        previewCameraManager?.startRegistration { sampleCount, targetCount, isHandPresent, isComplete, templateJson, error ->
-            mainHandler.post {
-                eventSink?.success(
-                    mapOf(
-                        "type" to "registration_progress",
-                        "sampleCount" to sampleCount,
-                        "targetCount" to targetCount,
-                        "isHandPresent" to isHandPresent,
-                        "isComplete" to isComplete,
-                        "templateJson" to templateJson,
-                        "error" to error
-                    )
-                )
-            }
-        }
-        result.success(true)
-    }
-
-    private fun handleStopGestureRegistration(result: MethodChannel.Result) {
-        previewCameraManager?.stopRegistration()
-        stopPreviewCamera()
-        result.success(true)
-    }
-
-    // --- Custom Gesture Test Session ---
-
-    private fun handleStartGestureTest(result: MethodChannel.Result) {
-        val owner = activity as? LifecycleOwner
-        if (owner == null) {
-            result.error("NO_LIFECYCLE", "Activity does not implement LifecycleOwner", null)
-            return
-        }
-
-        if (!hasCameraPermission()) {
-            result.error("NO_PERMISSION", "Camera permission is required for testing gestures", null)
-            return
-        }
-
-        ensurePreviewCamera(owner)
-        previewCameraManager?.startTest { gestureName, similarity, action, isHandPresent ->
-            mainHandler.post {
-                eventSink?.success(
-                    mapOf(
-                        "type" to "test_event",
-                        "gestureName" to gestureName,
-                        "similarity" to similarity,
-                        "action" to action,
-                        "isHandPresent" to isHandPresent
-                    )
-                )
-            }
-        }
-        result.success(true)
-    }
-
-    private fun handleStopGestureTest(result: MethodChannel.Result) {
-        previewCameraManager?.stopTest()
-        stopPreviewCamera()
-        result.success(true)
-    }
-
-    // --- Conflict Validation ---
-
-    private fun handleValidateGestureConflict(call: MethodCall, result: MethodChannel.Result) {
-        val templateJson = call.argument<String>("templateJson")
-        val excludeId = call.argument<String>("excludeGestureId")
-
-        if (templateJson.isNullOrBlank()) {
-            result.error("INVALID_ARGS", "templateJson is required", null)
-            return
-        }
-
-        val cameraMgr = previewCameraManager
-        val conflictResult = if (cameraMgr != null) {
-            cameraMgr.validateConflict(templateJson, excludeId)
-        } else {
-            val classifier = GestureClassifier()
-            val customClf = CustomGestureClassifier(context)
-            try {
-                val array = JSONArray(templateJson)
-                val points = ArrayList<Point3D>(array.length())
-                for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    points.add(
-                        Point3D(
-                            x = obj.getDouble("x").toFloat(),
-                            y = obj.getDouble("y").toFloat(),
-                            z = obj.getDouble("z").toFloat()
-                        )
-                    )
-                }
-                customClf.validateConflict(points, classifier, null, excludeId)
-            } catch (e: Exception) {
-                CustomGestureClassifier.ConflictResult(hasConflict = true, reason = e.message)
-            }
-        }
-
-        result.success(
-            mapOf(
-                "hasConflict" to conflictResult.hasConflict,
-                "conflictingGestureName" to conflictResult.conflictingGestureName,
-                "isDefaultGesture" to conflictResult.isDefaultGesture,
-                "similarity" to conflictResult.similarity,
-                "reason" to conflictResult.reason
-            )
-        )
-    }
-
-    private fun ensurePreviewCamera(owner: LifecycleOwner) {
-        if (previewCameraManager == null) {
-            previewCameraManager = GestureCameraManager(
-                context = context,
-                lifecycleOwner = owner,
-                onActionTriggered = { _, _ -> /* Never execute actions in preview mode */ },
-                onStateUpdated = { _, _, _ -> }
-            )
-        }
-    }
-
-    private fun stopPreviewCamera() {
-        previewCameraManager?.stop()
-        previewCameraManager?.release()
-        previewCameraManager = null
     }
 
     // --- EventChannel Streaming ---

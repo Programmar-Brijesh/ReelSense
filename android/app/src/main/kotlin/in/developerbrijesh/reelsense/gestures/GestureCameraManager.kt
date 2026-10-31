@@ -11,8 +11,6 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
-import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
-import org.json.JSONArray
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -32,7 +30,6 @@ class GestureCameraManager(
     private var cameraExecutor: ExecutorService? = null
 
     val classifier = GestureClassifier()
-    val customClassifier = CustomGestureClassifier(context)
     private val landmarkerHelper = HandLandmarkerHelper(context)
 
     private val stateMachine = GestureStateMachine(
@@ -45,20 +42,6 @@ class GestureCameraManager(
     )
 
     private var isAnalyzing = false
-
-    // Registration and testing flags
-    @Volatile var isRegistrationMode = false
-        private set
-    @Volatile var isTestMode = false
-        private set
-
-    private var trainer: CustomGestureTrainer? = null
-    private var onRegistrationProgress: ((sampleCount: Int, targetCount: Int, isHandPresent: Boolean, isComplete: Boolean, templateJson: String?, error: String?) -> Unit)? = null
-    private var onTestResult: ((gestureName: String?, similarity: Float, action: String?, isHandPresent: Boolean) -> Unit)? = null
-
-    // Cached raw landmarks for conflict verification during registration
-    @Volatile var lastDetectedRawLandmarks: List<NormalizedLandmark>? = null
-        private set
 
     init {
         stateMachine.onGestureStateChanged = { gestureName, isHandPresent, action ->
@@ -73,75 +56,52 @@ class GestureCameraManager(
         }
 
         if (!landmarkerHelper.isInitialized()) {
-            Log.e(TAG, "Cannot start camera: HandLandmarker model not initialized.")
+            Log.e(TAG, "MediaPipe HandLandmarkerHelper is not initialized.")
             return
         }
 
-        Log.i(TAG, "Starting CameraX gesture analysis...")
-        if (customClassifier.getTemplates().isEmpty()) {
-            val cached = CustomGestureClassifier.loadFromPrefs(context)
-            if (cached.isNotEmpty()) {
-                customClassifier.updateTemplates(cached)
-                Log.i("ReelSenseGestureSync", "GestureCameraManager loaded ${cached.size} custom gestures from SharedPreferences on start.")
-            }
-        }
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
             try {
                 cameraProvider = cameraProviderFuture.get()
-                bindCameraUseCases()
+
+                // Front camera selector
+                val cameraSelector = CameraSelector.Builder()
+                    .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
+                    .build()
+
+                // Resolution: 640x480 for fast on-device inference
+                imageAnalysis = ImageAnalysis.Builder()
+                    .setTargetResolution(Size(640, 480))
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .build()
+                    .also { analysis ->
+                        analysis.setAnalyzer(cameraExecutor!!) { imageProxy ->
+                            processImageProxy(imageProxy)
+                        }
+                    }
+
+                cameraProvider?.unbindAll()
+                cameraProvider?.bindToLifecycle(
+                    lifecycleOwner,
+                    cameraSelector,
+                    imageAnalysis
+                )
+
                 isAnalyzing = true
                 Log.i(TAG, "CameraX front camera bound and analyzing frames.")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to initialize CameraX: ${e.message}", e)
-                stop()
+                Log.e(TAG, "Use case binding failed: ${e.message}", e)
+                isAnalyzing = false
             }
         }, ContextCompat.getMainExecutor(context))
     }
 
-    private fun bindCameraUseCases() {
-        val provider = cameraProvider ?: return
-        val executor = cameraExecutor ?: return
-
-        provider.unbindAll()
-
-        // Prefer front camera for selfie/hand gesture control
-        val cameraSelector = if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            Log.w(TAG, "Front camera not found, falling back to default back camera.")
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
-
-        imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(Size(480, 640))
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-            .also { analysis ->
-                analysis.setAnalyzer(executor) { imageProxy ->
-                    processImageProxy(imageProxy)
-                }
-            }
-
-        try {
-            provider.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                imageAnalysis
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Error binding CameraX use case to lifecycle: ${e.message}", e)
-        }
-    }
-
+    @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
     private fun processImageProxy(imageProxy: ImageProxy) {
-        if (!isAnalyzing) {
-            imageProxy.close()
-            return
-        }
-
         try {
             val bitmap = imageProxy.toBitmap()
             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
@@ -157,62 +117,17 @@ class GestureCameraManager(
 
             if (detectionResult != null && detectionResult.landmarks().isNotEmpty()) {
                 val handLandmarks = detectionResult.landmarks()[0]
-                lastDetectedRawLandmarks = handLandmarks
 
-                // Case 1: Custom Gesture Registration Mode
-                if (isRegistrationMode) {
-                    trainer?.processFrame(handLandmarks)
-                    return
-                }
-
-                // Case 2: Custom Gesture Test Mode (No action dispatch)
-                if (isTestMode) {
-                    // Check default classifier first
-                    val defaultGesture = classifier.classify(handLandmarks)
-                    if (defaultGesture != HandGesture.UNKNOWN) {
-                        onTestResult?.invoke(defaultGesture.displayName, 1.0f, defaultGesture.action, true)
-                        return
-                    }
-
-                    // Then evaluate custom gesture classifier
-                    val normalized = HandLandmarkNormalizer.normalize(handLandmarks)
-                    val customMatch = if (normalized != null) customClassifier.classify(normalized) else null
-                    if (customMatch != null) {
-                        onTestResult?.invoke(customMatch.template.name, customMatch.similarity, customMatch.template.action, true)
-                    } else {
-                        onTestResult?.invoke(null, 0f, null, true)
-                    }
-                    return
-                }
-
-                // Case 3: Live Gesture Control Mode (Instagram Active)
+                // Live Gesture Control Mode (Instagram Active)
                 val defaultGesture = classifier.classify(handLandmarks)
                 if (defaultGesture != HandGesture.UNKNOWN) {
-                    Log.d("ReelSenseCustomClf", "Default classifier matched '${defaultGesture.displayName}', overriding custom classification.")
                     Log.i(TAG, "Hand detected! Classified default gesture: ${defaultGesture.displayName}")
                     stateMachine.processFrame(defaultGesture, isHandPresent = true)
                 } else {
-                    // Check registered custom gestures
-                    Log.d("ReelSenseCustomClf", "Default gesture UNKNOWN. Evaluating custom gestures...")
-                    val normalized = HandLandmarkNormalizer.normalize(handLandmarks)
-                    val customMatch = if (normalized != null) customClassifier.classify(normalized) else null
-                    if (customMatch != null) {
-                        Log.i("ReelSenseCustomClf", "Custom classification SUCCESS: ${customMatch.template.name} (${(customMatch.similarity * 100).toInt()}%) -> Action: ${customMatch.template.action}")
-                        stateMachine.processCustomFrame(customMatch.template, isHandPresent = true)
-                    } else {
-                        Log.d("ReelSenseCustomClf", "No custom gesture matched this frame.")
-                        stateMachine.processCandidate(null, isHandPresent = true)
-                    }
+                    stateMachine.processCandidate(null, isHandPresent = true)
                 }
             } else {
-                lastDetectedRawLandmarks = null
-                if (isRegistrationMode) {
-                    trainer?.processFrame(null)
-                } else if (isTestMode) {
-                    onTestResult?.invoke(null, 0f, null, false)
-                } else {
-                    stateMachine.processCandidate(null, isHandPresent = false)
-                }
+                stateMachine.processCandidate(null, isHandPresent = false)
             }
 
             // Cleanup bitmaps
@@ -227,89 +142,9 @@ class GestureCameraManager(
         }
     }
 
-    // --- Custom Gesture Training Session ---
-
-    fun startRegistration(onProgress: (sampleCount: Int, targetCount: Int, isHandPresent: Boolean, isComplete: Boolean, templateJson: String?, error: String?) -> Unit) {
-        isTestMode = false
-        isRegistrationMode = true
-        onRegistrationProgress = onProgress
-
-        val newTrainer = CustomGestureTrainer(
-            targetSampleCount = 25,
-            maxAllowedVariance = 0.35f,
-            onProgressUpdate = { sampleCount, targetCount, isHandPresent, isComplete, templateJson, error ->
-                onRegistrationProgress?.invoke(sampleCount, targetCount, isHandPresent, isComplete, templateJson, error)
-            }
-        )
-        trainer = newTrainer
-        newTrainer.start()
-        start()
-    }
-
-    fun stopRegistration() {
-        isRegistrationMode = false
-        trainer?.stop()
-        trainer = null
-        onRegistrationProgress = null
-        stop()
-    }
-
-    // --- Custom Gesture Testing Session ---
-
-    fun startTest(onResult: (gestureName: String?, similarity: Float, action: String?, isHandPresent: Boolean) -> Unit) {
-        isRegistrationMode = false
-        isTestMode = true
-        onTestResult = onResult
-        start()
-    }
-
-    fun stopTest() {
-        isTestMode = false
-        onTestResult = null
-        stop()
-    }
-
-    // --- Custom Gesture Templates Synchronization ---
-
-    fun updateCustomTemplates(templates: List<CustomGestureTemplate>) {
-        customClassifier.updateTemplates(templates)
-    }
-
-    // --- Conflict Validation ---
-
-    fun validateConflict(templateJson: String, excludeGestureId: String? = null): CustomGestureClassifier.ConflictResult {
-        return try {
-            val array = JSONArray(templateJson)
-            val points = ArrayList<Point3D>(array.length())
-            for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                points.add(
-                    Point3D(
-                        x = obj.getDouble("x").toFloat(),
-                        y = obj.getDouble("y").toFloat(),
-                        z = obj.getDouble("z").toFloat()
-                    )
-                )
-            }
-            customClassifier.validateConflict(
-                candidateTemplate = points,
-                defaultClassifier = classifier,
-                rawLandmarks = lastDetectedRawLandmarks,
-                excludeGestureId = excludeGestureId
-            )
-        } catch (e: Exception) {
-            CustomGestureClassifier.ConflictResult(
-                hasConflict = true,
-                reason = "Invalid gesture template data: ${e.message}"
-            )
-        }
-    }
-
     fun stop() {
         Log.i(TAG, "Stopping CameraX gesture analysis...")
         isAnalyzing = false
-        isRegistrationMode = false
-        isTestMode = false
         stateMachine.reset()
 
         try {
