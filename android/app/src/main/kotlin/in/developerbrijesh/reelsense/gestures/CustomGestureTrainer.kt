@@ -9,7 +9,7 @@ class CustomGestureTrainer(
     private val onProgressUpdate: (sampleCount: Int, targetCount: Int, isHandPresent: Boolean, isComplete: Boolean, templateJson: String?, error: String?) -> Unit
 ) {
     companion object {
-        private const val TAG = "ReelSenseTrainer"
+        private const val TAG = "ReelSenseCustomTrainer"
     }
 
     private val samples = ArrayList<List<Point3D>>()
@@ -59,6 +59,7 @@ class CustomGestureTrainer(
             if (avgDiff > maxAllowedVariance) {
                 // Hand was moved; update lastSample to new pose so user can stabilize hand
                 lastSample = normalized
+                Log.d(TAG, "Frame rejected: movement variance ${String.format("%.3f", avgDiff)} > maxAllowedVariance $maxAllowedVariance. Current samples: ${samples.size}/$targetSampleCount")
                 onProgressUpdate(
                     samples.size,
                     targetSampleCount,
@@ -73,13 +74,14 @@ class CustomGestureTrainer(
 
         samples.add(normalized)
         lastSample = normalized
+        Log.d(TAG, "Sample accepted: count=${samples.size}/$targetSampleCount")
 
         if (samples.size >= targetSampleCount) {
             // Training complete! Compute mean golden template
             val averagedTemplate = computeAveragedTemplate(samples)
             val json = CustomGestureTemplate.landmarksToJson(averagedTemplate)
             isRecording = false
-            Log.i(TAG, "Training complete with ${samples.size} stable frames.")
+            Log.i(TAG, "Training complete with ${samples.size} stable frames. Generated template with ${averagedTemplate.size} landmarks.")
             onProgressUpdate(samples.size, targetSampleCount, true, true, json, null)
         } else {
             onProgressUpdate(samples.size, targetSampleCount, true, false, null, null)

@@ -50,6 +50,7 @@ class GestureStateMachine(
             displayName = template.name,
             action = template.action
         )
+        Log.d(TAG, "processCustomFrame: candidate key=${cand.key}, name=${cand.displayName}, action=${cand.action}")
         processCandidate(cand, isHandPresent)
     }
 
@@ -72,7 +73,7 @@ class GestureStateMachine(
             // If we were awaiting neutral reset after an action, verify neutral condition satisfied
             if (isAwaitingNeutralReset && neutralStreak >= requiredNeutralFrames) {
                 isAwaitingNeutralReset = false
-                Log.i(TAG, "Neutral reset satisfied ($neutralStreak frames). Ready for next gesture.")
+                Log.i(TAG, "Neutral reset satisfied ($neutralStreak neutral frames). Ready for next gesture.")
             }
             return
         }
@@ -82,19 +83,24 @@ class GestureStateMachine(
 
         // If currently in cooldown or waiting for neutral reset, ignore ongoing gesture
         if (isAwaitingNeutralReset) {
+            Log.d(TAG, "Candidate '${detectedCandidate.displayName}' ignored: awaiting neutral reset ($requiredNeutralFrames neutral frames needed).")
             return
         }
 
-        if (now - lastActionTimestamp < actionCooldownMs) {
+        val elapsedSinceAction = now - lastActionTimestamp
+        if (elapsedSinceAction < actionCooldownMs) {
+            Log.d(TAG, "Candidate '${detectedCandidate.displayName}' ignored: in cooldown (${elapsedSinceAction}ms / ${actionCooldownMs}ms).")
             return
         }
 
         // 3. Track consecutive frame stability
         if (detectedCandidate.key == candidate?.key) {
             candidateStreak++
+            Log.d(TAG, "Candidate '${detectedCandidate.displayName}' streak: $candidateStreak / $requiredConsecutiveFrames")
         } else {
             candidate = detectedCandidate
             candidateStreak = 1
+            Log.d(TAG, "New candidate '${detectedCandidate.displayName}' (key=${detectedCandidate.key}), starting streak at 1 / $requiredConsecutiveFrames")
         }
 
         // 4. Once stability threshold is reached, trigger action once
@@ -102,7 +108,7 @@ class GestureStateMachine(
             val targetCandidate = candidate!!
             val action = targetCandidate.action
             if (!action.isNullOrBlank()) {
-                Log.i(TAG, "Gesture confirmed: ${targetCandidate.displayName} -> Action: $action")
+                Log.i(TAG, "Gesture confirmed: ${targetCandidate.displayName} (key=${targetCandidate.key}) -> Action: $action")
                 lastActionTimestamp = now
                 isAwaitingNeutralReset = true // Must see neutral before another action can ever fire
                 val confirmedDisplayName = targetCandidate.displayName
@@ -110,6 +116,8 @@ class GestureStateMachine(
                 candidate = null
 
                 onActionTriggered(confirmedDisplayName, action)
+            } else {
+                Log.w(TAG, "Candidate ${targetCandidate.displayName} reached stability threshold but action is null or empty.")
             }
         }
     }

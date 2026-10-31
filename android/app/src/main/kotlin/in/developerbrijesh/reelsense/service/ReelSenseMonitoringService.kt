@@ -27,6 +27,7 @@ import androidx.lifecycle.LifecycleService
 import `in`.developerbrijesh.reelsense.MainActivity
 import `in`.developerbrijesh.reelsense.accessibility.ReelSenseAccessibilityService
 import `in`.developerbrijesh.reelsense.commands.NativeCommandMatcher
+import `in`.developerbrijesh.reelsense.gestures.CustomGestureClassifier
 import `in`.developerbrijesh.reelsense.gestures.CustomGestureTemplate
 import `in`.developerbrijesh.reelsense.gestures.GestureCameraManager
 import `in`.developerbrijesh.reelsense.gestures.GestureHandler
@@ -331,6 +332,11 @@ class ReelSenseMonitoringService : LifecycleService() {
                 )
             }
 
+            // Always ensure the latest custom templates from SharedPreferences are loaded
+            val cachedTemplates = CustomGestureClassifier.loadFromPrefs(applicationContext)
+            gestureCameraManager?.updateCustomTemplates(cachedTemplates)
+            Log.i("ReelSenseGestureSync", "startGestureCamera: loaded ${cachedTemplates.size} custom gestures from SharedPreferences.")
+
             gestureCameraManager?.start()
             overlayManager?.updateGestureTracking(isCameraActive = true, isHandPresent = false)
             Log.i(TAG_GESTURE, "GestureCameraManager started.")
@@ -373,6 +379,7 @@ class ReelSenseMonitoringService : LifecycleService() {
     }
 
     fun updateCustomGestures(templates: List<CustomGestureTemplate>) {
+        Log.i("ReelSenseGestureSync", "ReelSenseMonitoringService.updateCustomGestures: received ${templates.size} custom gestures.")
         gestureCameraManager?.updateCustomTemplates(templates)
     }
 

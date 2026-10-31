@@ -76,6 +76,12 @@ class CustomGestureClassifier(context: Context? = null) {
         val reason: String? = null
     )
 
+    fun reloadTemplatesFromPrefs(ctx: Context) {
+        val cached = loadFromPrefs(ctx)
+        updateTemplates(cached)
+        Log.i(TAG, "Reloaded ${cached.size} templates from SharedPreferences.")
+    }
+
     @Synchronized
     fun updateTemplates(newTemplates: List<CustomGestureTemplate>) {
         templates.clear()
@@ -96,27 +102,57 @@ class CustomGestureClassifier(context: Context? = null) {
      */
     @Synchronized
     fun classify(normalizedLandmarks: List<Point3D>): MatchResult? {
-        if (normalizedLandmarks.size < 21) return null
+        if (normalizedLandmarks.size < 21) {
+            Log.d(TAG, "Classification rejected: Insufficient landmarks (${normalizedLandmarks.size} < 21).")
+            return null
+        }
 
         val currentTemplates = if (templates.isNotEmpty()) templates else sharedTemplates
-        if (currentTemplates.isEmpty()) return null
+        if (currentTemplates.isEmpty()) {
+            Log.d(TAG, "Classification rejected: No custom gesture templates loaded.")
+            return null
+        }
 
         var bestMatch: CustomGestureTemplate? = null
         var highestSimilarity = 0f
+        var bestCandidateName: String? = null
+        var rejectionReason: String? = null
 
         for (template in currentTemplates) {
-            if (!template.isEnabled) continue
+            if (!template.isEnabled) {
+                Log.d(TAG, "Template '${template.name}' (id=${template.id}) is disabled. Skipping.")
+                continue
+            }
 
             val similarity = computeSimilarity(normalizedLandmarks, template.landmarks)
-            if (similarity >= template.confidenceThreshold && similarity > highestSimilarity) {
+            val passes = similarity >= template.confidenceThreshold
+
+            Log.d(TAG, "Candidate '${template.name}' (id=${template.id}): " +
+                    "enabled=${template.isEnabled}, " +
+                    "landmarks=${template.landmarks.size}, " +
+                    "similarity=${String.format("%.3f", similarity)}, " +
+                    "threshold=${template.confidenceThreshold}, " +
+                    "status=${if (passes) "PASSED" else "REJECTED_BELOW_THRESHOLD"}")
+
+            if (passes && similarity > highestSimilarity) {
                 highestSimilarity = similarity
                 bestMatch = template
+                bestCandidateName = template.name
+            } else if (similarity > highestSimilarity) {
+                highestSimilarity = similarity
+                bestCandidateName = template.name
+                rejectionReason = "Similarity (${String.format("%.3f", similarity)}) < required threshold (${template.confidenceThreshold})"
             }
         }
 
         return if (bestMatch != null) {
+            Log.i(TAG, "Classification MATCH! Best gesture='${bestMatch.name}' (id=${bestMatch.id}), " +
+                    "similarity=${String.format("%.3f", highestSimilarity)} >= threshold=${bestMatch.confidenceThreshold}, " +
+                    "action=${bestMatch.action}")
             MatchResult(bestMatch, highestSimilarity)
         } else {
+            Log.d(TAG, "Classification REJECTED. Best candidate='${bestCandidateName ?: "None"}', " +
+                    "reason: ${rejectionReason ?: "no enabled templates"}")
             null
         }
     }
@@ -172,6 +208,8 @@ class CustomGestureClassifier(context: Context? = null) {
     /**
      * Computes similarity between two normalized 21-landmark poses.
      * Scale: 0.0 (completely dissimilar) to 1.0 (identical pose).
+     * In HandLandmarkNormalizer, wrist-to-MCP9 (palmSize) is normalized to 1.0f.
+     * 1.0f represents the canonical unit distance scale of the hand.
      */
     fun computeSimilarity(pointsA: List<Point3D>, pointsB: List<Point3D>): Float {
         if (pointsA.size < 21 || pointsB.size < 21) return 0f
@@ -188,11 +226,11 @@ class CustomGestureClassifier(context: Context? = null) {
         }
 
         val meanDist = totalDist / 21f
-        // Weighted distance combining average point error and max point error
+        // Weighted distance combining average point error (70%) and max point error (30%)
         val weightedDist = (meanDist * 0.70f) + (maxDist * 0.30f)
 
-        // 0.40f is the maximum expected distance for valid hand variations
-        val score = 1.0f - (weightedDist / 0.40f)
+        // palmSize (wrist to MCP9) is normalized to 1.0f; 1.0f is the canonical unit scale of the hand
+        val score = 1.0f - (weightedDist / 1.0f)
         return max(0f, score)
     }
 }

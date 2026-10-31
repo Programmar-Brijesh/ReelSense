@@ -78,6 +78,13 @@ class GestureCameraManager(
         }
 
         Log.i(TAG, "Starting CameraX gesture analysis...")
+        if (customClassifier.getTemplates().isEmpty()) {
+            val cached = CustomGestureClassifier.loadFromPrefs(context)
+            if (cached.isNotEmpty()) {
+                customClassifier.updateTemplates(cached)
+                Log.i("ReelSenseGestureSync", "GestureCameraManager loaded ${cached.size} custom gestures from SharedPreferences on start.")
+            }
+        }
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
@@ -181,16 +188,19 @@ class GestureCameraManager(
                 // Case 3: Live Gesture Control Mode (Instagram Active)
                 val defaultGesture = classifier.classify(handLandmarks)
                 if (defaultGesture != HandGesture.UNKNOWN) {
+                    Log.d("ReelSenseCustomClf", "Default classifier matched '${defaultGesture.displayName}', overriding custom classification.")
                     Log.i(TAG, "Hand detected! Classified default gesture: ${defaultGesture.displayName}")
                     stateMachine.processFrame(defaultGesture, isHandPresent = true)
                 } else {
                     // Check registered custom gestures
+                    Log.d("ReelSenseCustomClf", "Default gesture UNKNOWN. Evaluating custom gestures...")
                     val normalized = HandLandmarkNormalizer.normalize(handLandmarks)
                     val customMatch = if (normalized != null) customClassifier.classify(normalized) else null
                     if (customMatch != null) {
-                        Log.i(TAG, "Hand detected! Classified custom gesture: ${customMatch.template.name} (${(customMatch.similarity * 100).toInt()}%) -> Action: ${customMatch.template.action}")
+                        Log.i("ReelSenseCustomClf", "Custom classification SUCCESS: ${customMatch.template.name} (${(customMatch.similarity * 100).toInt()}%) -> Action: ${customMatch.template.action}")
                         stateMachine.processCustomFrame(customMatch.template, isHandPresent = true)
                     } else {
+                        Log.d("ReelSenseCustomClf", "No custom gesture matched this frame.")
                         stateMachine.processCandidate(null, isHandPresent = true)
                     }
                 }

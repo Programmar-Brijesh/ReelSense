@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../gestures/data/custom_gesture_repository.dart';
+import '../../gestures/services/gesture_platform_service.dart';
 import '../../onboarding/screens/onboarding_screen.dart';
 import '../../onboarding/services/onboarding_storage_service.dart';
 import '../../dashboard/screens/dashboard_screen.dart';
@@ -40,6 +42,17 @@ class _SplashScreenState extends State<SplashScreen>
 
   Future<void> _navigateToNextScreen() async {
     if (!mounted) return;
+
+    // Synchronize custom gestures from SQLite to native SharedPreferences on startup
+    try {
+      final customRepo = SqliteCustomGestureRepository();
+      final customs = await customRepo.getAllGestures();
+      final gestureService = GesturePlatformService();
+      await gestureService.syncCustomGestures(customs);
+      debugPrint('[ReelSenseGestureSync] Startup sync completed: ${customs.length} custom gestures synced.');
+    } catch (e) {
+      debugPrint('[ReelSenseGestureSync] Startup sync warning: $e');
+    }
 
     final hasCompleted = await _storageService.hasCompletedOnboarding();
 

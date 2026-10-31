@@ -120,10 +120,13 @@ class GestureHandler(
     // --- Custom Gestures Synchronization ---
 
     private fun handleSyncCustomGestures(call: MethodCall, result: MethodChannel.Result) {
+        val tagSync = "ReelSenseGestureSync"
         try {
             val list = call.argument<List<Map<String, Any>>>("gestures") ?: emptyList()
             val jsonArray = JSONArray()
             val templates = ArrayList<CustomGestureTemplate>()
+
+            Log.i(tagSync, "handleSyncCustomGestures: received ${list.size} gestures from Flutter.")
 
             for (map in list) {
                 val id = map["id"] as? String ?: continue
@@ -146,6 +149,9 @@ class GestureHandler(
                 val t = CustomGestureTemplate.fromJson(templateJson, id, name, action, threshold, isEnabled)
                 if (t != null) {
                     templates.add(t)
+                    Log.d(tagSync, "Parsed gesture: id=$id, name='$name', action=$action, threshold=$threshold, enabled=$isEnabled, landmarks=${t.landmarks.size}")
+                } else {
+                    Log.w(tagSync, "Failed to parse template for gesture id=$id, name='$name'")
                 }
             }
 
@@ -157,10 +163,10 @@ class GestureHandler(
             previewCameraManager?.updateCustomTemplates(templates)
             ReelSenseMonitoringService.instance?.updateCustomGestures(templates)
 
-            Log.i(TAG, "Synced ${templates.size} custom gestures to native engine.")
+            Log.i(tagSync, "Successfully synced ${templates.size} custom gestures to SharedPreferences, sharedTemplates, and active engines.")
             result.success(true)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to sync custom gestures: ${e.message}", e)
+            Log.e(tagSync, "Failed to sync custom gestures: ${e.message}", e)
             result.error("SYNC_ERROR", e.message, null)
         }
     }
