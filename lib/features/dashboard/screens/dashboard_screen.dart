@@ -1,9 +1,16 @@
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../autostart/screens/auto_start_settings_screen.dart';
+import '../../autostart/services/auto_start_platform_service.dart';
+import '../../autostart/services/auto_start_preference_service.dart';
 import '../../commands/screens/voice_commands_screen.dart';
 import '../../gestures/screens/gesture_settings_screen.dart';
 import '../../permissions/screens/permissions_screen.dart';
 import '../../privacy/screens/privacy_settings_screen.dart';
+import '../../recognition/screens/voice_settings_screen.dart';
+import '../../recognition/services/recognition_availability_service.dart';
+import '../../recognition/services/recognition_preference_service.dart';
+import '../../recognition/widgets/initial_recognition_setup_sheet.dart';
 import '../../settings/screens/settings_screen.dart';
 import '../models/controller_state.dart';
 import '../services/dashboard_preferences_service.dart';
@@ -22,6 +29,11 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   final DashboardPreferencesService _prefsService =
       DashboardPreferencesService();
+  final RecognitionPreferenceService _recognitionPrefs =
+      RecognitionPreferenceService();
+  final RecognitionAvailabilityService _availabilityService =
+      RecognitionAvailabilityService();
+
   ControllerState _state = const ControllerState();
   bool _isLoading = true;
 
@@ -39,6 +51,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _isLoading = false;
       });
     }
+
+    try {
+      final autoStartConfig = await AutoStartPreferenceService().loadConfig();
+      if (autoStartConfig.isEnabled) {
+        final isRunning = await AutoStartPlatformService().isMonitoringServiceRunning();
+        if (!isRunning) {
+          await AutoStartPlatformService().startMonitoringService(autoStartConfig);
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> _toggleMasterController() async {
@@ -73,6 +95,61 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _toggleVoiceControl(bool enabled) async {
+    if (enabled) {
+      final isSetupDone = await _recognitionPrefs.isInitialSetupDone();
+      final mode = await _recognitionPrefs.getSelectedMode();
+
+      if (!isSetupDone || mode == null) {
+        final locale = await _recognitionPrefs.getSelectedLocale();
+        if (!mounted) return;
+
+        // Show Initial Voice Recognition Setup
+        await showModalBottomSheet(
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: Colors.transparent,
+          builder: (ctx) => InitialRecognitionSetupSheet(
+            locale: locale,
+            availabilityService: _availabilityService,
+            preferenceService: _recognitionPrefs,
+            onModeSelected: (selectedMode) {
+              _applyVoiceControlState(true);
+            },
+          ),
+        );
+        return;
+      }
+
+      // Validate availability before activating
+      final locale = await _recognitionPrefs.getSelectedLocale();
+      final isAvail = await _availabilityService.isModeAvailable(mode, locale);
+      if (!isAvail) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: const Color(0xFF261919),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 4),
+            content: Text(
+              '${mode.displayName} is currently unavailable for $locale. Open Voice Settings to resolve.',
+              style: const TextStyle(color: Color(0xFFFFCDD2)),
+            ),
+            action: SnackBarAction(
+              label: 'Settings',
+              textColor: AppColors.accentCyan,
+              onPressed: () => _navigateTo(const VoiceSettingsScreen()),
+            ),
+          ),
+        );
+        return;
+      }
+    }
+
+    await _applyVoiceControlState(enabled);
+  }
+
+  Future<void> _applyVoiceControlState(bool enabled) async {
     setState(() {
       _state = _state.copyWith(isVoiceEnabled: enabled);
     });
@@ -282,6 +359,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       subtitle: 'View and customize recognition triggers',
                       accentColor: AppColors.accentCyan,
                       onTap: () => _navigateTo(const VoiceCommandsScreen()),
+                    ),
+                    const SizedBox(height: 10),
+                    QuickActionCard(
+                      icon: Icons.flash_on_rounded,
+                      title: 'Auto-Start Controller',
+                      subtitle: 'Auto-activate hands-free controls on Instagram',
+                      accentColor: const Color(0xFF00E5FF),
+                      onTap: () => _navigateTo(const AutoStartSettingsScreen()),
+                    ),
+                    const SizedBox(height: 10),
+
+                    QuickActionCard(
+                      icon: Icons.tune_rounded,
+                      title: 'Voice Recognition Mode',
+                      subtitle: 'Configure Offline / Online speech engine',
+                      accentColor: AppColors.accentCyan,
+                      onTap: () => _navigateTo(const VoiceSettingsScreen()),
                     ),
                     const SizedBox(height: 10),
 

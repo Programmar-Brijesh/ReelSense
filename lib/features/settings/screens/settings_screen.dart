@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../autostart/screens/auto_start_settings_screen.dart';
 import '../../onboarding/screens/onboarding_screen.dart';
 import '../../onboarding/services/onboarding_storage_service.dart';
+import '../../recognition/screens/voice_settings_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -53,6 +55,24 @@ class SettingsScreen extends StatelessWidget {
         child: ListView(
           padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 12.0),
           children: [
+            _buildSettingsTile(
+              title: 'Auto-Start Controller',
+              subtitle: 'Automatic hands-free activation on Instagram',
+              icon: Icons.flash_on_rounded,
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (context) => const AutoStartSettingsScreen()),
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildSettingsTile(
+              title: 'Speech Recognition Mode',
+              subtitle: 'Configure Offline / Online voice recognition',
+              icon: Icons.mic_rounded,
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (context) => const VoiceSettingsScreen()),
+              ),
+            ),
+            const SizedBox(height: 12),
             _buildSettingsTile(
               title: 'Replay Onboarding Flow',
               subtitle: 'View the 3-step introduction walkthrough again',

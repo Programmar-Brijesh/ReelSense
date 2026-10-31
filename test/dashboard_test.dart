@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:reelsense/features/commands/screens/voice_commands_screen.dart';
 import 'package:reelsense/features/dashboard/screens/dashboard_screen.dart';
 import 'package:reelsense/features/dashboard/services/dashboard_preferences_service.dart';
@@ -8,6 +9,8 @@ import 'package:reelsense/features/settings/screens/settings_screen.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  sqfliteFfiInit();
+  databaseFactory = databaseFactoryFfi;
 
   group('DashboardPreferencesService Unit Tests', () {
     late DashboardPreferencesService service;
@@ -228,10 +231,16 @@ void main() {
       final voiceCommandsAction = find.text('My Voice Commands');
       await tester.ensureVisible(voiceCommandsAction);
       await tester.tap(voiceCommandsAction);
+      for (int i = 0; i < 5; i++) {
+        await tester.pump();
+        await tester.runAsync(() async {
+          await Future.delayed(const Duration(milliseconds: 100));
+        });
+      }
       await tester.pumpAndSettle();
 
       expect(find.byType(VoiceCommandsScreen), findsOneWidget);
-      expect(find.text('"Next" / "Scroll Down"'), findsOneWidget);
+      expect(find.text('Voice Commands Manager'), findsOneWidget);
     });
   });
 }

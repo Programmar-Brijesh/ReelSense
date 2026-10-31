@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Reel Sense</string>
+    <string name="accessibility_service_description">ReelSense detects when Instagram is in the foreground to provide hands-free voice and gesture navigation, performing user-directed scroll and tap actions.</string>
+    <string name="notification_channel_name">ReelSense Auto-Start Controller</string>
+    <string name="notification_channel_description">Persistent background monitoring for Instagram hands-free navigation</string>
 </resources>
